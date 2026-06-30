@@ -42,37 +42,6 @@ public class DynamicProxyConfigProvider(McpProxyConfig mcpConfig) : IProxyConfig
             }
         };
 
-        // Add MCP route only when a destination is configured
-        var mcp = mcpConfig.ParseDestination();
-        if (mcp.HasValue)
-        {
-            var (host, pathPrefix) = mcp.Value;
-            routes.Add(new RouteConfig
-            {
-                RouteId = "mcp-route",
-                ClusterId = "mcp-cluster",
-                Match = new RouteMatch
-                {
-                    Hosts = ["localhost:9999", "127.0.0.1:9999"],
-                    Path = "{**catch-all}"
-                },
-                // Prepend the path from the destination URL (e.g. /tndata/CloudDebugger)
-                Transforms = string.IsNullOrEmpty(pathPrefix)
-                    ? null
-                    : [new Dictionary<string, string> { ["PathPrefix"] = pathPrefix }]
-            });
-
-            clusters.Add(new ClusterConfig
-            {
-                ClusterId = "mcp-cluster",
-                Destinations = new Dictionary<string, DestinationConfig>
-                {
-                    ["dest"] = new() { Address = host }
-                },
-                HttpRequest = LongTimeout
-            });
-        }
-
         return new InMemoryProxyConfig(routes, clusters, mcpConfig.GetChangeToken());
     }
 }

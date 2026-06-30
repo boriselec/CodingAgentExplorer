@@ -68,11 +68,9 @@ dotnet build
 dotnet run --project CodingAgentExplorer
 ```
 
-This starts four endpoints:
+This starts two endpoints, both bound to localhost only:
 - **Port 8888** - The reverse proxy (HTTP, point your coding agent here)
-- **Port 9999** - The MCP proxy (HTTP, used by the MCP Observer)
-- **Port 5000** - The web dashboard (HTTP)
-- **Port 5001** - The web dashboard (HTTPS, auto-launches in browser)
+- **Port 5000** - The web dashboard (HTTP, auto-launches in browser)
 
 ### 4. Configure your coding agent
 
@@ -112,13 +110,12 @@ Then use Claude Code as you normally would.
 
 ### 5. Open the dashboard
 
-Navigate to [https://localhost:5001](https://localhost:5001) in your browser. On Windows the browser opens automatically on `dotnet run`. On macOS and Linux, open it manually.
+Navigate to [http://localhost:5000](http://localhost:5000) in your browser. On Windows the browser opens automatically on `dotnet run`. On macOS and Linux, open it manually.
 
-You will see three views:
+You will see these views:
 
 - **HTTP Inspector** - Table view of all proxied requests with headers, bodies, SSE events, and timing details
 - **Conversation View** - Chat-style display showing messages, tool use, and responses
-- **MCP Observer** - Dedicated view for inspecting MCP server traffic (see below)
 
 ## MCP Observer
 

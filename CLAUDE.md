@@ -5,9 +5,8 @@ ASP.NET Core reverse proxy using YARP that sits between AI coding agents (such a
 ## Architecture
 
 - **Port 8888** (`localhost`): YARP reverse proxy forwarding to LLM API (HTTP)
-- **Port 9999** (`localhost`): YARP reverse proxy forwarding to MCP server (HTTP), destination configured at runtime
-- **Port 5000** (`localhost`): Dashboard (HTTP)
-- **Port 5001** (`localhost`): Dashboard (HTTPS, auto-launches browser)
+- **Port 5000** (`localhost`): Dashboard (HTTP, auto-launches browser)
+- All ports bind to localhost (loopback) only and are never exposed externally
 - Single project, single NuGet dependency (`Yarp.ReverseProxy`)
 
 ## Build & Run
@@ -41,19 +40,11 @@ Set the API base URL to point at the proxy:
 export ANTHROPIC_BASE_URL=http://localhost:8888
 ```
 
-Then use Claude Code normally. All requests flow through the proxy and appear on the dashboard at `https://localhost:5001`.
+Then use Claude Code normally. All requests flow through the proxy and appear on the dashboard at `http://localhost:5000`.
 
 ## MCP Observer
 
-The MCP Observer proxies traffic between Claude Code and any MCP server on port 9999. The destination URL is configured at runtime via the dashboard at `https://localhost:5001/mcp/index.html`.
-
-Register the proxy as an MCP server in Claude Code:
-
-```bash
-claude mcp add --transport http mcp_proxy http://localhost:9999
-```
-
-The destination URL is stored in `McpProxyConfig` (singleton) and triggers a YARP config reload via `IChangeToken` when updated. SSE keep-alive GET requests to `/` with no body are silently dropped and not stored.
+The MCP proxy has been removed: there is no longer a listener on port 9999 and YARP no longer registers an MCP route. The `McpProxyConfig`, `McpRequestStore`, and `wwwroot/mcp/` page remain in the codebase but are inactive (no traffic is proxied).
 
 ## Project Structure
 
@@ -64,7 +55,7 @@ The destination URL is stored in `McpProxyConfig` (singleton) and triggers a YAR
 - `Services/McpRequestStore.cs` - In-memory store for MCP requests (max 500)
 - `Services/McpProxyConfig.cs` - Holds the runtime MCP destination URL, signals YARP on change
 - `Proxy/CaptureTransformProvider.cs` - YARP ITransformProvider for request/response capture
-- `Proxy/DynamicProxyConfigProvider.cs` - Dynamic YARP config for Claude (8888) and MCP (9999) routes
+- `Proxy/DynamicProxyConfigProvider.cs` - Dynamic YARP config for the Claude (8888) route
 - `Hubs/DashboardHub.cs` - SignalR hub for real-time dashboard updates
 - `wwwroot/` - Dashboard SPA (vanilla HTML/JS/CSS + SignalR client)
 - `wwwroot/mcp/` - MCP Observer page
@@ -86,8 +77,6 @@ The destination URL is stored in `McpProxyConfig` (singleton) and triggers a YAR
 
 - YARP `ITransformProvider` for intercepting requests/responses (not middleware)
 - `SuppressResponseBody = true` + manual line-by-line forwarding for SSE streaming
-- Kestrel: port 8888 (HTTP proxy), port 9999 (MCP proxy), port 5000 (HTTP dashboard), port 5001 (HTTPS dashboard)
+- Kestrel: port 8888 (HTTP proxy), port 5000 (HTTP dashboard); both bind to localhost only
 - API keys are redacted from stored request headers
 - Streaming SSE events are parsed to extract token usage, message ID, stop reason, and time-to-first-token
-- MCP destination URL is held in `McpProxyConfig` singleton; changing it cancels a `CancellationTokenSource` to signal YARP to reload routes via `DynamicProxyConfigProvider`
-- MCP SSE keep-alive polling (GET / with no body) is filtered out in `StoreAndNotify` before reaching the store or SignalR
