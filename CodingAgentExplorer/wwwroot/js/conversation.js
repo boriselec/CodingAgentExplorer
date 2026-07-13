@@ -12,6 +12,7 @@ const feed = document.getElementById("conversationFeed");
 const statusDot = document.getElementById("connectionStatus");
 const statusText = document.getElementById("connectionText");
 const requestCount = document.getElementById("requestCount");
+const newMsgIndicator = document.getElementById("newMsgIndicator");
 
 // Connection status
 connection.onreconnecting(() => {
@@ -43,10 +44,11 @@ connection.on("HookHistory", (history) => {
 
 // Receive new hook event
 connection.on("NewHookEvent", (evt) => {
-    hookEvents.push(evt);
-    insertHookEventInTimeline(evt);
+    withScrollPinning(() => {
+        hookEvents.push(evt);
+        insertHookEventInTimeline(evt);
+    }, { indicate: true });
     updateCount();
-    autoScroll();
 });
 
 // Receive clear
@@ -68,22 +70,23 @@ hookCb.addEventListener("change", () => { showHookEvents = hookCb.checked; rende
 
 // Receive new request
 connection.on("NewRequest", (req) => {
-    // Replace if we already have this id (update), otherwise append
-    const idx = requests.findIndex(r => r.id === req.id);
-    if (idx >= 0) {
-        requests[idx] = req;
-        // Re-render just that exchange
-        const existing = feed.querySelector(`[data-id="${req.id}"]`);
-        if (existing) {
-            const el = buildExchangeElement(req);
-            existing.replaceWith(el);
+    withScrollPinning(() => {
+        // Replace if we already have this id (update), otherwise append
+        const idx = requests.findIndex(r => r.id === req.id);
+        if (idx >= 0) {
+            requests[idx] = req;
+            // Re-render just that exchange
+            const existing = feed.querySelector(`[data-id="${req.id}"]`);
+            if (existing) {
+                const el = buildExchangeElement(req);
+                existing.replaceWith(el);
+            }
+        } else {
+            requests.push(req);
+            appendExchange(req);
         }
-    } else {
-        requests.push(req);
-        appendExchange(req);
-    }
+    }, { indicate: true });
     updateCount();
-    autoScroll();
 });
 
 // Start
@@ -98,24 +101,28 @@ try {
 // ---------- Rendering ----------
 
 function renderFeed() {
-    feed.innerHTML = "";
-    const items = [
-        ...requests.map(r => ({ kind: "request", ts: new Date(r.timestamp), data: r })),
-        ...(showHookEvents ? hookEvents.map(e => ({ kind: "hook", ts: new Date(e.timestamp), data: e })) : []),
-    ].sort((a, b) => a.ts - b.ts);
+    // Bulk re-render (history load, clear, filter toggle): preserve the user's
+    // place if they'd scrolled up, but don't surface the "new messages"
+    // indicator, since this isn't fresh content arriving.
+    withScrollPinning(() => {
+        feed.innerHTML = "";
+        const items = [
+            ...requests.map(r => ({ kind: "request", ts: new Date(r.timestamp), data: r })),
+            ...(showHookEvents ? hookEvents.map(e => ({ kind: "hook", ts: new Date(e.timestamp), data: e })) : []),
+        ].sort((a, b) => a.ts - b.ts);
 
-    if (items.length === 0) {
-        feed.innerHTML = '<p class="empty-state">Waiting for API requests...</p>';
-        return;
-    }
-    for (const item of items) {
-        if (item.kind === "request") {
-            feed.appendChild(buildExchangeElement(item.data));
-        } else {
-            feed.appendChild(buildHookEventElement(item.data));
+        if (items.length === 0) {
+            feed.innerHTML = '<p class="empty-state">Waiting for API requests...</p>';
+            return;
         }
-    }
-    autoScroll();
+        for (const item of items) {
+            if (item.kind === "request") {
+                feed.appendChild(buildExchangeElement(item.data));
+            } else {
+                feed.appendChild(buildHookEventElement(item.data));
+            }
+        }
+    });
 }
 
 function appendExchange(req) {
@@ -968,11 +975,43 @@ function copyExchangeJson(req, btn) {
 
 // ---------- Helpers ----------
 
-function autoScroll() {
-    requestAnimationFrame(() => {
-        feed.scrollTop = feed.scrollHeight;
-    });
+// Whether the feed is scrolled to the very bottom. The < 1 (rather than <= 0)
+// only absorbs sub-pixel rounding; any real scroll-up counts as not-pinned.
+function isPinnedToBottom() {
+    return feed.scrollHeight - feed.scrollTop - feed.clientHeight < 1;
 }
+
+function scrollToBottom() {
+    feed.scrollTop = feed.scrollHeight;
+}
+
+// Run a feed mutation while preserving the user's place. The pinned state must
+// be measured BEFORE `mutate` runs, since appending content grows scrollHeight;
+// owning both halves here keeps callers from getting that ordering wrong. If
+// they were at the bottom we keep them there; if they'd scrolled up we leave
+// their position alone and, for incrementally arriving content (indicate),
+// surface the "new messages" indicator instead of yanking them down.
+function withScrollPinning(mutate, { indicate = false } = {}) {
+    const wasPinned = isPinnedToBottom();
+    mutate();
+    if (wasPinned) {
+        requestAnimationFrame(scrollToBottom);
+    } else if (indicate) {
+        newMsgIndicator.hidden = false;
+    }
+}
+
+// Hide the indicator once the user is back at the live feed. Skip the layout
+// read entirely while it's already hidden (the common case), since reading
+// scroll metrics forces a reflow on every scroll frame.
+feed.addEventListener("scroll", () => {
+    if (!newMsgIndicator.hidden && isPinnedToBottom()) newMsgIndicator.hidden = true;
+});
+
+newMsgIndicator.addEventListener("click", () => {
+    scrollToBottom();
+    newMsgIndicator.hidden = true;
+});
 
 function updateCount() {
     const label = requests.length === 1 ? "exchange" : "exchanges";

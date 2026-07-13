@@ -104,6 +104,34 @@ header h1 {
 main {
     flex: 1;
     overflow: hidden;
+    position: relative;
+}
+
+/* "New messages" indicator, shown only when scrolled up off the live feed */
+.new-msg-indicator {
+    position: absolute;
+    left: 50%;
+    bottom: 16px;
+    transform: translateX(-50%);
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    color: var(--text-secondary);
+    padding: 5px 14px;
+    border-radius: 14px;
+    font-size: 12px;
+    cursor: pointer;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25);
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.new-msg-indicator:hover {
+    background: var(--accent);
+    color: var(--bg);
+    border-color: var(--accent);
+}
+
+.new-msg-indicator[hidden] {
+    display: none;
 }
 
 /* Conversation feed */
