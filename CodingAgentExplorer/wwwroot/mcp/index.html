@@ -146,8 +146,9 @@
             font-weight: 600;
             font-family: 'SFMono-Regular', Consolas, monospace;
         }
-        .method-get { background: #1f3d1a; color: var(--green); }
-        .method-post { background: #1a2d3d; color: var(--accent); }
+        /* Use theme variables so the badges adapt in both light and dark mode */
+        .method-get { background: var(--green-subtle); color: var(--green); }
+        .method-post { background: var(--accent-subtle); color: var(--accent); }
         .method-other { background: var(--bg-tertiary); color: var(--text-secondary); }
         .path-cell {
             font-family: 'SFMono-Regular', Consolas, monospace;
@@ -314,7 +315,7 @@
         <span class="separator">|</span>
         <button class="clear-btn" onclick="document.getElementById('helpModal').showModal()">Help</button>
         <span class="separator">|</span>
-        <button id="themeToggle" class="theme-toggle-btn" title="Toggle light/dark mode" onclick="toggleTheme()"><span class="theme-icon">🌙</span></button>
+        <button id="themeToggle" class="theme-toggle-btn" aria-label="Toggle light/dark theme" title="Toggle light/dark mode" onclick="toggleTheme()"><span class="theme-icon">🌙</span></button>
         <span class="separator">|</span>
         <span class="status-dot" id="connDot"></span>
         <span id="connText">Disconnected</span>
