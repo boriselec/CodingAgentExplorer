@@ -15,6 +15,8 @@ builder.WebHost.ConfigureKestrel(options =>
 {
     // Port 8888: Claude API proxy (HTTP)
     options.ListenLocalhost(8888);
+    // Port 8889: llama.cpp (OpenAI-compatible) proxy (HTTP)
+    options.ListenLocalhost(8889);
     // Port 5000: Dashboard (HTTP)
     options.ListenLocalhost(5000);
 });

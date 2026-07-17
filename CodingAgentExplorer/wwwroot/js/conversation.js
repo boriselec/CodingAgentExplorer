@@ -165,10 +165,17 @@ function buildExchangeElement(req) {
 
     // 2. Parse request body
     const parsed = parseRequestBody(req.requestBody);
+    let messages = parsed.messages || [];
 
-    // System prompt
-    if (parsed.system) {
-        messagesDiv.appendChild(buildSystemPrompt(parsed.system));
+    // System prompt. Anthropic sends a top-level `system` field; OpenAI-compatible clients
+    // (e.g. Cline -> llama.cpp) instead send it as the first message with role "system".
+    let systemData = parsed.system;
+    if (!systemData && messages.length > 0 && messages[0].role === "system") {
+        systemData = messages[0].content;
+        messages = messages.slice(1);
+    }
+    if (systemData) {
+        messagesDiv.appendChild(buildSystemPrompt(systemData));
     }
 
     // Tools section
@@ -177,7 +184,7 @@ function buildExchangeElement(req) {
     }
 
     // 3. Messages from request — collapse history, show only last user message
-    appendMessageBubbles(messagesDiv, parsed.messages);
+    appendMessageBubbles(messagesDiv, messages);
 
     // 4. API response
     let responseContent = req.isStreaming
@@ -243,7 +250,7 @@ function buildMetaBar(req) {
 
     const items = [
         { label: "Time", value: formatTime(req.timestamp), tip: "When the API request was made" },
-        { label: "Model", value: req.model || "-", tip: "Claude model used for this request" },
+        { label: "Model", value: formatModel(req.model), tip: "Claude model used for this request", valueTitle: req.model },
         { label: "Status", value: req.statusCode || "-", cls: statusCls(req.statusCode), tip: "HTTP status code returned by the API" },
         { label: "Context", value: `${formatTokens(totalInputTok)} tok`, tip: "Total input context tokens (new + cache write + cache read)" },
         { label: "New In", value: `${formatTokens(req.inputTokens)} tok`, tip: "Uncached input tokens (billed at full rate)" },
@@ -257,7 +264,8 @@ function buildMetaBar(req) {
     for (const item of items) {
         const span = document.createElement("span");
         span.className = "meta-item";
-        span.title = item.tip;
+        // Show the full untruncated value (e.g. the gguf path) on hover when provided.
+        span.title = item.valueTitle ? `${item.tip}\n${item.valueTitle}` : item.tip;
         span.innerHTML = `<span class="meta-label">${esc(item.label)}:</span> <span class="meta-value ${item.cls || ""}">${esc(String(item.value))}</span>`;
         bar.appendChild(span);
     }
@@ -583,6 +591,15 @@ function renderContentBlock(block) {
         return el;
     }
 
+    if (type === "thinking") {
+        const el = document.createElement("div");
+        el.className = "content-text";
+        el.style.opacity = "0.6";
+        el.style.fontStyle = "italic";
+        el.textContent = block.text || block.thinking || "";
+        return el;
+    }
+
     if (type === "tool_use") {
         return buildToolUseBlock(block);
     }
@@ -678,6 +695,12 @@ function parseRequestBody(bodyStr) {
 function parseStreamingResponse(sseEvents) {
     if (!sseEvents || sseEvents.length === 0) return [];
 
+    // OpenAI-compatible streams (e.g. llama.cpp) emit chunks with a "choices" array and no
+    // Anthropic content_block events. Detected and parsed in a single pass; returns null for
+    // Anthropic streams so we fall through to the content_block handling below.
+    const openAiBlocks = parseOpenAiStreamingResponse(sseEvents);
+    if (openAiBlocks) return openAiBlocks;
+
     const contentBlocks = [];     // indexed by content_block index
 
     for (const evt of sseEvents) {
@@ -748,11 +771,56 @@ function parseNonStreamingResponse(bodyStr) {
     if (!bodyStr) return [];
     try {
         const obj = JSON.parse(bodyStr);
+        // OpenAI-compatible (llama.cpp) responses nest the message under choices[].
+        if (Array.isArray(obj.choices)) return parseOpenAiMessage(obj.choices[0]?.message);
         return obj.content || [];
     } catch {
         // If it's not JSON, return the raw text as a text block
         return bodyStr ? [{ type: "text", text: bodyStr }] : [];
     }
+}
+
+// ---------- OpenAI-compatible response parsing (llama.cpp) ----------
+
+// Reassembles a streamed OpenAI response into content blocks in a single pass. Text and
+// reasoning accumulate across chunks. Returns null if no chunk carried a "choices" array,
+// i.e. this is not an OpenAI-compatible stream. (Cline drives llama.cpp with text-based tool
+// calling, so tool invocations arrive inline in the assistant text rather than as native
+// tool_calls.)
+function parseOpenAiStreamingResponse(sseEvents) {
+    let text = "";
+    let reasoning = "";
+    let isOpenAi = false;
+
+    for (const evt of sseEvents) {
+        if (!evt.data || evt.data === "[DONE]") continue;
+        let data;
+        try { data = JSON.parse(evt.data); } catch { continue; }
+        if (!Array.isArray(data.choices)) continue;
+        isOpenAi = true;
+
+        const delta = data.choices[0]?.delta;
+        if (!delta) continue;
+
+        if (typeof delta.content === "string") text += delta.content;
+        if (typeof delta.reasoning_content === "string") reasoning += delta.reasoning_content;
+    }
+
+    return isOpenAi ? buildOpenAiBlocks(reasoning, text) : null;
+}
+
+function parseOpenAiMessage(message) {
+    if (!message) return [];
+    const text = typeof message.content === "string" ? message.content : "";
+    return buildOpenAiBlocks(message.reasoning_content || "", text);
+}
+
+// Converts the collected OpenAI pieces into the Anthropic-shaped blocks the renderer understands.
+function buildOpenAiBlocks(reasoning, text) {
+    const blocks = [];
+    if (reasoning) blocks.push({ type: "thinking", text: reasoning });
+    if (text) blocks.push({ type: "text", text });
+    return blocks;
 }
 
 // ---------- Details Section ----------
@@ -1157,6 +1225,18 @@ function formatTime(ts) {
 function formatTokens(n) {
     if (n == null) return "-";
     return n.toLocaleString();
+}
+
+// Anthropic reports a clean model id (e.g. "claude-opus-4-8"); llama.cpp reports a filesystem
+// path to the .gguf. Compact the path to a readable name, dropping the directory, the .gguf
+// extension, and a trailing quantization tag (e.g. -UD-Q3_K_XL, -Q4_K_M, -IQ4_XS, -F16).
+function formatModel(m) {
+    if (!m) return "-";
+    // For a clean id (e.g. "claude-opus-4-8") the transforms below are all no-ops, so no
+    // separate short-circuit is needed.
+    let name = m.split(/[\\/]/).pop().replace(/\.gguf$/i, "");
+    name = name.replace(/-(UD-)?(I?Q\d[0-9A-Za-z_]*|BF16|F16|F32)$/i, "");
+    return name || m;
 }
 
 function formatCharCount(n) {

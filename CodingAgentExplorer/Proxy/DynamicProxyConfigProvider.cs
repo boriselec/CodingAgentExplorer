@@ -26,6 +26,16 @@ public class DynamicProxyConfigProvider(McpProxyConfig mcpConfig) : IProxyConfig
                     Hosts = ["localhost:8888", "127.0.0.1:8888"],
                     Path = "{**catch-all}"
                 }
+            },
+            new()
+            {
+                RouteId = "llama-route",
+                ClusterId = "llama-cluster",
+                Match = new RouteMatch
+                {
+                    Hosts = ["localhost:8889", "127.0.0.1:8889"],
+                    Path = "{**catch-all}"
+                }
             }
         };
 
@@ -37,6 +47,15 @@ public class DynamicProxyConfigProvider(McpProxyConfig mcpConfig) : IProxyConfig
                 Destinations = new Dictionary<string, DestinationConfig>
                 {
                     ["dest"] = new() { Address = "https://api.anthropic.com" }
+                },
+                HttpRequest = LongTimeout
+            },
+            new()
+            {
+                ClusterId = "llama-cluster",
+                Destinations = new Dictionary<string, DestinationConfig>
+                {
+                    ["dest"] = new() { Address = "http://192.168.1.128:8080" }
                 },
                 HttpRequest = LongTimeout
             }

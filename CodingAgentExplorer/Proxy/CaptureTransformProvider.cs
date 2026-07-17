@@ -13,6 +13,15 @@ namespace CodingAgentExplorer.Proxy;
 
 public class CaptureTransformProvider : ITransformProvider
 {
+    // Hop-by-hop / transfer-framing headers that must not be forwarded from the upstream
+    // response to the client when we re-emit the body ourselves. Kestrel sets its own framing.
+    private static readonly HashSet<string> HopByHopResponseHeaders = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "Transfer-Encoding",
+        "Connection",
+        "Keep-Alive"
+    };
+
     public void ValidateRoute(TransformRouteValidationContext context) { }
     public void ValidateCluster(TransformClusterValidationContext context) { }
 
@@ -189,9 +198,15 @@ public class CaptureTransformProvider : ITransformProvider
             proxiedRequest.Error = $"Unexpected Content-Encoding on SSE stream: {contentEncoding}";
         }
 
-        // Copy other response headers to client
+        // Copy other response headers to client, skipping hop-by-hop framing headers.
+        // The upstream body is already de-chunked by YARP's HttpClient and we re-emit it
+        // manually below, so forwarding the upstream's Transfer-Encoding/Connection/Keep-Alive
+        // (e.g. "Transfer-Encoding: chunked" from llama.cpp's HTTP/1.1) would mislabel the
+        // bytes we write and corrupt the stream ("Malformed encoding found in chunked-encoding").
+        // Kestrel manages transfer framing for the client connection itself.
         foreach (var header in proxyResponse.Headers
-            .Where(header => !clientResponse.Headers.ContainsKey(header.Key)))
+            .Where(header => !clientResponse.Headers.ContainsKey(header.Key)
+                && !HopByHopResponseHeaders.Contains(header.Key)))
         {
             clientResponse.Headers[header.Key] = header.Value.ToArray();
         }
@@ -273,6 +288,14 @@ public class CaptureTransformProvider : ITransformProvider
             using var doc = JsonDocument.Parse(data);
             var root = doc.RootElement;
 
+            // OpenAI-compatible stream chunks (e.g. llama.cpp) carry a "choices" array and
+            // have no Anthropic "event:" type. Detect by shape rather than by port.
+            if (root.TryGetProperty("choices", out _))
+            {
+                ParseOpenAiChunk(request, root, stopwatch, ref firstTokenSeen);
+                return;
+            }
+
             switch (eventType)
             {
                 case "message_start":
@@ -296,6 +319,99 @@ public class CaptureTransformProvider : ITransformProvider
         {
             // Ignore parse errors in SSE data
         }
+    }
+
+    // Parses one OpenAI-compatible streaming chunk (chat.completion.chunk). Populates message id,
+    // time-to-first-token, stop reason, and token usage. Usage comes either from a standard
+    // "usage" object (only present when the client sends stream_options.include_usage) or, as a
+    // fallback, from llama.cpp's non-standard "timings" object in the final chunk.
+    private static void ParseOpenAiChunk(ProxiedRequest request, JsonElement root,
+        Stopwatch stopwatch, ref bool firstTokenSeen)
+    {
+        if (request.MessageId is null
+            && root.TryGetProperty("id", out var id))
+            request.MessageId = id.GetString();
+
+        if (string.IsNullOrEmpty(request.Model)
+            && root.TryGetProperty("model", out var model))
+            request.Model = model.GetString();
+
+        if (root.TryGetProperty("choices", out var choices)
+            && choices.ValueKind == JsonValueKind.Array
+            && choices.GetArrayLength() > 0)
+        {
+            var choice = choices[0];
+
+            if (!firstTokenSeen
+                && choice.TryGetProperty("delta", out var delta)
+                && (HasNonEmptyString(delta, "content") || HasNonEmptyString(delta, "reasoning_content")))
+            {
+                firstTokenSeen = true;
+                request.TimeToFirstTokenMs = stopwatch.Elapsed.TotalMilliseconds;
+            }
+
+            if (choice.TryGetProperty("finish_reason", out var finishReason)
+                && finishReason.ValueKind == JsonValueKind.String)
+                request.StopReason = finishReason.GetString();
+        }
+
+        if (root.TryGetProperty("usage", out var usage)
+            && usage.ValueKind == JsonValueKind.Object)
+            ApplyOpenAiUsage(request, usage);
+
+        if (root.TryGetProperty("timings", out var timings)
+            && timings.ValueKind == JsonValueKind.Object)
+            ApplyLlamaTimings(request, timings);
+    }
+
+    private static bool HasNonEmptyString(JsonElement obj, string prop) =>
+        obj.TryGetProperty(prop, out var v)
+        && v.ValueKind == JsonValueKind.String
+        && !string.IsNullOrEmpty(v.GetString());
+
+    // Maps OpenAI usage onto the Anthropic-shaped meta fields: prompt_tokens is the full input
+    // context, of which cached_tokens were served from cache. InputTokens holds the uncached
+    // ("new") remainder so Context = InputTokens + CacheRead = prompt_tokens in the dashboard.
+    private static void ApplyOpenAiUsage(ProxiedRequest request, JsonElement usage)
+    {
+        int cached = 0;
+        if (usage.TryGetProperty("prompt_tokens_details", out var details)
+            && details.TryGetProperty("cached_tokens", out var ct)
+            && ct.TryGetInt32(out var ctv))
+            cached = ctv;
+
+        if (usage.TryGetProperty("prompt_tokens", out var pt)
+            && pt.TryGetInt32(out var ptv))
+        {
+            request.CacheReadInputTokens = cached;
+            request.InputTokens = ptv - cached;
+        }
+
+        if (usage.TryGetProperty("completion_tokens", out var comp)
+            && comp.TryGetInt32(out var compv))
+            request.OutputTokens = compv;
+    }
+
+    // Fallback for llama.cpp streams without a "usage" object: cache_n = cached prompt tokens,
+    // prompt_n = newly evaluated prompt tokens, predicted_n = generated tokens. Only applied when
+    // a standard usage object has not already populated the counts.
+    private static void ApplyLlamaTimings(ProxiedRequest request, JsonElement timings)
+    {
+        if (request.InputTokens is null)
+        {
+            int cacheN = timings.TryGetProperty("cache_n", out var cn) && cn.TryGetInt32(out var cnv) ? cnv : 0;
+            int promptN = timings.TryGetProperty("prompt_n", out var pn) && pn.TryGetInt32(out var pnv) ? pnv : 0;
+            if (cacheN > 0 || promptN > 0)
+            {
+                request.CacheReadInputTokens = cacheN;
+                request.InputTokens = promptN;
+            }
+        }
+
+        if (request.OutputTokens is null
+            && timings.TryGetProperty("predicted_n", out var predicted)
+            && predicted.TryGetInt32(out var predictedN))
+            request.OutputTokens = predictedN;
     }
 
     private static void ParseMessageStart(ProxiedRequest request, JsonElement root)
@@ -356,6 +472,14 @@ public class CaptureTransformProvider : ITransformProvider
             using var doc = JsonDocument.Parse(body);
             var root = doc.RootElement;
 
+            // OpenAI-compatible non-streaming response (e.g. llama.cpp): "choices" array with a
+            // nested message and standard usage. Handled separately from the Anthropic shape.
+            if (root.TryGetProperty("choices", out var choices))
+            {
+                ParseOpenAiResponse(request, root, choices);
+                return;
+            }
+
             if (root.TryGetProperty("id", out var id))
                 request.MessageId = id.GetString();
 
@@ -381,5 +505,24 @@ public class CaptureTransformProvider : ITransformProvider
         {
             // Not a JSON response we can parse
         }
+    }
+
+    private static void ParseOpenAiResponse(ProxiedRequest request, JsonElement root, JsonElement choices)
+    {
+        if (root.TryGetProperty("id", out var id))
+            request.MessageId = id.GetString();
+
+        if (choices.ValueKind == JsonValueKind.Array && choices.GetArrayLength() > 0
+            && choices[0].TryGetProperty("finish_reason", out var finishReason)
+            && finishReason.ValueKind == JsonValueKind.String)
+            request.StopReason = finishReason.GetString();
+
+        if (root.TryGetProperty("usage", out var usage)
+            && usage.ValueKind == JsonValueKind.Object)
+            ApplyOpenAiUsage(request, usage);
+
+        if (string.IsNullOrEmpty(request.Model)
+            && root.TryGetProperty("model", out var model))
+            request.Model = model.GetString();
     }
 }
