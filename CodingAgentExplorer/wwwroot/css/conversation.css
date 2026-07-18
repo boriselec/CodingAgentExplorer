@@ -492,12 +492,15 @@ main {
     border-left: 3px solid var(--accent);
 }
 
-.message-assistant-history {
+.message-assistant-history,
+.message-tool-history {
     align-self: flex-end;
     background: var(--bg);
     border-right: 3px solid var(--purple);
     opacity: 0.65;
 }
+
+.message-tool-history { border-right-color: var(--orange); }
 
 .message-response {
     align-self: flex-end;
@@ -515,6 +518,7 @@ main {
 
 .message-user .role-label { color: var(--accent); }
 .message-assistant-history .role-label { color: var(--purple); }
+.message-tool-history .role-label { color: var(--orange); }
 .message-response .role-label { color: var(--green); }
 
 /* Content blocks */

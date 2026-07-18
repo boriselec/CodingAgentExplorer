@@ -546,17 +546,22 @@ function estimateContentChars(content) {
 
 // ---------- Message Bubbles ----------
 
+const MESSAGE_BUBBLE_META = {
+    user: { cssClass: "message-user", labelText: "User" },
+    tool: { cssClass: "message-tool-history", labelText: "Tool Result" },
+    assistant: { cssClass: "message-assistant-history", labelText: "Assistant (History)" },
+};
+
 function buildMessageBubble(msg) {
     const role = msg.role || "user";
-    const isUser = role === "user";
-    const cssClass = isUser ? "message-user" : "message-assistant-history";
+    const { cssClass, labelText } = MESSAGE_BUBBLE_META[role] || MESSAGE_BUBBLE_META.assistant;
 
     const bubble = document.createElement("div");
     bubble.className = `message ${cssClass}`;
 
     const label = document.createElement("span");
     label.className = "role-label";
-    label.textContent = isUser ? "User" : "Assistant (History)";
+    label.textContent = labelText;
     bubble.appendChild(label);
 
     const content = msg.content;
@@ -684,12 +689,79 @@ function parseRequestBody(bodyStr) {
         const obj = JSON.parse(bodyStr);
         return {
             system: obj.system || null,
-            messages: obj.messages || [],
-            tools: obj.tools || null,
+            messages: normalizeMessages(obj.messages),
+            tools: normalizeTools(obj.tools),
         };
     } catch {
         return {};
     }
+}
+
+// Tools arrive in two shapes: Anthropic ({ name, description, input_schema }) and
+// OpenAI-compatible ({ type: "function", function: { name, description, parameters } }).
+// Normalize the OpenAI shape to Anthropic's so the rendering code stays format-agnostic.
+function normalizeTools(tools) {
+    if (!Array.isArray(tools)) return null;
+    return tools.map((tool) => {
+        if (tool && tool.type === "function" && tool.function) {
+            const fn = tool.function;
+            return {
+                name: fn.name,
+                description: fn.description,
+                input_schema: fn.parameters,
+            };
+        }
+        return tool;
+    });
+}
+
+// History messages also differ by format. OpenAI-compatible clients express tool activity as
+// assistant messages with a `tool_calls` array and separate `role: "tool"` result messages,
+// whereas Anthropic inlines both as tool_use / tool_result content blocks. Normalize the
+// OpenAI shape into Anthropic-style content blocks so buildMessageBubble stays format-agnostic.
+function normalizeMessages(messages) {
+    if (!Array.isArray(messages)) return [];
+    // Anthropic bodies (the common case) need no normalization, so return the original array
+    // rather than allocating a mapped copy on every render.
+    const needsNormalizing = messages.some(
+        (m) => m && (m.role === "tool" || (m.role === "assistant" && Array.isArray(m.tool_calls)))
+    );
+    return needsNormalizing ? messages.map(normalizeMessage) : messages;
+}
+
+function normalizeMessage(msg) {
+    if (!msg) return msg;
+
+    // OpenAI tool result: a standalone message referencing the originating call by id.
+    if (msg.role === "tool") {
+        return {
+            role: "tool",
+            content: [{ type: "tool_result", tool_use_id: msg.tool_call_id, content: msg.content }],
+        };
+    }
+
+    // OpenAI assistant turn that invoked one or more tools.
+    if (msg.role === "assistant" && Array.isArray(msg.tool_calls)) {
+        const blocks = [];
+        if (typeof msg.content === "string" && msg.content) {
+            blocks.push({ type: "text", text: msg.content });
+        }
+        for (const tc of msg.tool_calls) blocks.push(openAiToolCallToBlock(tc));
+        return { role: "assistant", content: blocks };
+    }
+
+    return msg;
+}
+
+// Converts one OpenAI tool call ({ id, function: { name, arguments } }) into an Anthropic
+// tool_use block. Arguments are a JSON string; fall back to the raw text if it won't parse.
+function openAiToolCallToBlock(tc) {
+    const fn = tc.function || {};
+    let input = {};
+    if (typeof fn.arguments === "string" && fn.arguments) {
+        try { input = JSON.parse(fn.arguments); } catch { input = { arguments: fn.arguments }; }
+    }
+    return { type: "tool_use", id: tc.id, name: fn.name, input };
 }
 
 function parseStreamingResponse(sseEvents) {
@@ -791,6 +863,7 @@ function parseOpenAiStreamingResponse(sseEvents) {
     let text = "";
     let reasoning = "";
     let isOpenAi = false;
+    const toolCalls = []; // indexed by delta.tool_calls[].index; id/name/arguments arrive in fragments
 
     for (const evt of sseEvents) {
         if (!evt.data || evt.data === "[DONE]") continue;
@@ -804,15 +877,33 @@ function parseOpenAiStreamingResponse(sseEvents) {
 
         if (typeof delta.content === "string") text += delta.content;
         if (typeof delta.reasoning_content === "string") reasoning += delta.reasoning_content;
+        if (Array.isArray(delta.tool_calls)) {
+            for (const tc of delta.tool_calls) {
+                const idx = tc.index ?? 0;
+                const slot = toolCalls[idx] || (toolCalls[idx] = { id: "", function: { name: "", arguments: "" } });
+                if (tc.id) slot.id = tc.id;
+                if (tc.function?.name) slot.function.name = tc.function.name;
+                if (typeof tc.function?.arguments === "string") slot.function.arguments += tc.function.arguments;
+            }
+        }
     }
 
-    return isOpenAi ? buildOpenAiBlocks(reasoning, text) : null;
+    if (!isOpenAi) return null;
+    const blocks = buildOpenAiBlocks(reasoning, text);
+    for (const slot of toolCalls) {
+        if (slot) blocks.push(openAiToolCallToBlock(slot));
+    }
+    return blocks;
 }
 
 function parseOpenAiMessage(message) {
     if (!message) return [];
     const text = typeof message.content === "string" ? message.content : "";
-    return buildOpenAiBlocks(message.reasoning_content || "", text);
+    const blocks = buildOpenAiBlocks(message.reasoning_content || "", text);
+    if (Array.isArray(message.tool_calls)) {
+        for (const tc of message.tool_calls) blocks.push(openAiToolCallToBlock(tc));
+    }
+    return blocks;
 }
 
 // Converts the collected OpenAI pieces into the Anthropic-shaped blocks the renderer understands.
