@@ -26,6 +26,7 @@ builder.Services.AddSingleton<RequestStore>();
 builder.Services.AddSingleton<HookEventStore>();
 builder.Services.AddSingleton<McpProxyConfig>();
 builder.Services.AddSingleton<McpRequestStore>();
+builder.Services.AddSingleton<TailscaleExitNodeGuard>();
 builder.Services.AddSingleton<ITransformProvider, CaptureTransformProvider>();
 builder.Services.AddSignalR()
     .AddJsonProtocol(options =>
@@ -44,6 +45,32 @@ var app = builder.Build();
 app.UseWhen(
     ctx => ctx.Connection.LocalPort is 5000,
     branch => branch.UseStaticFiles());
+
+// Gate the Claude proxy flow (port 8888): only forward upstream when Tailscale is
+// currently routing traffic through an exit node. Requests are blocked (403) otherwise
+// and never reach YARP. The llama proxy (8889) and dashboard (5000) are unaffected.
+app.UseWhen(
+    ctx => ctx.Connection.LocalPort is 8888,
+    branch => branch.Use(async (ctx, next) =>
+    {
+        var guard = ctx.RequestServices.GetRequiredService<TailscaleExitNodeGuard>();
+        var result = await guard.CheckAsync(ctx.RequestAborted);
+        if (!result.Allowed)
+        {
+            ctx.Response.StatusCode = StatusCodes.Status403Forbidden;
+            await ctx.Response.WriteAsJsonAsync(new
+            {
+                error = new
+                {
+                    type = "tailscale_exit_node_required",
+                    message = $"Request blocked by CodingAgentExplorer: {result.Reason}"
+                }
+            });
+            return;
+        }
+
+        await next();
+    }));
 
 // Dashboard endpoints (port 5000 only)
 app.MapHub<DashboardHub>("/hub").RequireHost(DashboardPort5000);
