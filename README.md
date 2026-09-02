@@ -305,7 +305,7 @@ Hook events appear inline in the Conversation View, interleaved with API request
 ├── CodingAgentExplorer/
 │   ├── Program.cs                      # App setup: YARP, SignalR, dual-port Kestrel
 │   ├── Models/                         # DTOs: ProxiedRequest, ClaudeRequestBody, SseEvent, HookEvent
-│   ├── Services/RequestStore.cs        # In-memory circular buffer (max 1000 requests)
+│   ├── Services/RequestStore.cs        # In-memory circular buffer (100 MB budget)
 │   ├── Services/HookEventStore.cs      # In-memory store for hook events
 │   ├── Services/McpRequestStore.cs     # In-memory store for MCP requests
 │   ├── Services/McpProxyConfig.cs      # Holds the configured MCP destination URL
@@ -327,7 +327,7 @@ Hook events appear inline in the Conversation View, interleaved with API request
 
 - API keys (`x-api-key` and `Authorization` headers) are automatically redacted from stored request data
 - The proxy only listens on `localhost` - it is not exposed to the network
-- Request data is stored in memory only (max 1000 requests, no persistence)
+- Request data is stored in memory only (up to 100 MB of captured traffic, no persistence)
 
 ## About the author
 

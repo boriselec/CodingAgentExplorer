@@ -50,7 +50,7 @@ The MCP proxy has been removed: there is no longer a listener on port 9999 and Y
 
 - `Program.cs` - App setup: YARP, SignalR, dual-port Kestrel, API endpoints
 - `Models/` - DTOs: ProxiedRequest, ClaudeRequestBody, SseEvent, HookEvent, McpDestinationRequest
-- `Services/RequestStore.cs` - In-memory circular buffer (ConcurrentQueue, max 1000)
+- `Services/RequestStore.cs` - In-memory circular buffer (ConcurrentQueue, evicts oldest past a 100 MB budget)
 - `Services/HookEventStore.cs` - In-memory store for hook events
 - `Services/McpRequestStore.cs` - In-memory store for MCP requests (max 500)
 - `Services/McpProxyConfig.cs` - Holds the runtime MCP destination URL, signals YARP on change

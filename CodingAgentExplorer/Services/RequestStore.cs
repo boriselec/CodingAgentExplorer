@@ -5,21 +5,27 @@ namespace CodingAgentExplorer.Services;
 
 public class RequestStore
 {
-    private readonly ConcurrentQueue<ProxiedRequest> _requests = new();
-    private readonly int _maxSize;
+    private const long MaxBytes = 100L * 1024 * 1024;
 
-    public RequestStore(int maxSize = 1000)
-    {
-        _maxSize = maxSize;
-    }
+    // Flat per-entry cost covering headers, scalar fields and object overhead. It also keeps
+    // body-less requests (e.g. GET /) counting toward the budget, so the queue stays bounded.
+    private const long EntryOverheadBytes = 1024;
+
+    private readonly ConcurrentQueue<ProxiedRequest> _requests = new();
+    private readonly object _lock = new();
+    private long _totalBytes;
 
     public void Add(ProxiedRequest request)
     {
-        _requests.Enqueue(request);
-
-        while (_requests.Count > _maxSize)
+        lock (_lock)
         {
-            _requests.TryDequeue(out _);
+            _requests.Enqueue(request);
+            _totalBytes += EstimateBytes(request);
+
+            while (_totalBytes > MaxBytes && _requests.TryDequeue(out var evicted))
+            {
+                _totalBytes -= EstimateBytes(evicted);
+            }
         }
     }
 
@@ -35,11 +41,26 @@ public class RequestStore
 
     public void Clear()
     {
-        while (_requests.TryDequeue(out _))
+        lock (_lock)
         {
-            // Intentionally empty — drain the queue
+            _requests.Clear();
+            _totalBytes = 0;
         }
     }
 
     public int Count => _requests.Count;
+
+    // Bodies dominate retained size, so only strings are measured. .NET strings are UTF-16.
+    // Sizes are stable by the time a request is stored: SSE streaming completes first.
+    private static long EstimateBytes(ProxiedRequest request)
+    {
+        long chars = (request.RequestBody?.Length ?? 0) + (request.ResponseBody?.Length ?? 0);
+
+        foreach (var sseEvent in request.SseEvents)
+        {
+            chars += (sseEvent.Data?.Length ?? 0) + (sseEvent.EventType?.Length ?? 0);
+        }
+
+        return chars * sizeof(char) + EntryOverheadBytes;
+    }
 }
