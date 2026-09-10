@@ -11,7 +11,7 @@ using Yarp.ReverseProxy.Transforms.Builder;
 
 namespace CodingAgentExplorer.Proxy;
 
-public class CaptureTransformProvider : ITransformProvider
+public class CaptureTransformProvider(ILogger<CaptureTransformProvider> logger) : ITransformProvider
 {
     // Hop-by-hop / transfer-framing headers that must not be forwarded from the upstream
     // response to the client when we re-emit the body ourselves. Kestrel sets its own framing.
@@ -34,14 +34,14 @@ public class CaptureTransformProvider : ITransformProvider
         // that causes "Decompression error: ZlibError" in this scenario.
         context.AddRequestHeaderRemove("Accept-Encoding");
 
-        context.AddRequestTransform(requestContext
-            => CaptureRequestAsync(requestContext.HttpContext));
+        context.AddRequestTransform(CaptureRequestAsync);
 
         context.AddResponseTransform(CaptureResponseAsync);
     }
 
-    private static async ValueTask CaptureRequestAsync(HttpContext httpContext)
+    private async ValueTask CaptureRequestAsync(RequestTransformContext context)
     {
+        var httpContext = context.HttpContext;
         var request = httpContext.Request;
 
         // Enable buffering so we can read the body
@@ -54,6 +54,17 @@ public class CaptureTransformProvider : ITransformProvider
             using var reader = new StreamReader(request.Body, Encoding.UTF8, leaveOpen: true);
             body = await reader.ReadToEndAsync();
             request.Body.Position = 0;
+        }
+
+        // Capture the scrubbed body rather than the client's, so the dashboard shows what the
+        // API actually received.
+        var scrubbed = string.IsNullOrEmpty(body) ? null : RequestScrubber.Scrub(body);
+        if (scrubbed is not null)
+        {
+            ForwardScrubbedBody(context, scrubbed);
+            logger.LogDebug("Scrubbed request body for {Path}: {Before} -> {After} chars",
+                request.Path, body!.Length, scrubbed.Length);
+            body = scrubbed;
         }
 
         var proxiedRequest = new ProxiedRequest
@@ -86,6 +97,20 @@ public class CaptureTransformProvider : ITransformProvider
 
         httpContext.Items["ProxiedRequest"] = proxiedRequest;
         httpContext.Items["Stopwatch"] = Stopwatch.StartNew();
+    }
+
+    // YARP rejects a replacement HttpContent, so the swap goes through the request stream it
+    // copies from, and the Content-Length already copied from the client has to be corrected
+    // by hand.
+    private static void ForwardScrubbedBody(RequestTransformContext context, string scrubbed)
+    {
+        var bytes = Encoding.UTF8.GetBytes(scrubbed);
+        var request = context.HttpContext.Request;
+
+        request.Body = new MemoryStream(bytes, writable: false);
+        request.ContentLength = bytes.Length;
+        if (context.ProxyRequest.Content is { } content)
+            content.Headers.ContentLength = bytes.Length;
     }
 
     private static void CopyHeadersWithRedaction(

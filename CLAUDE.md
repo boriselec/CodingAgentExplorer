@@ -54,6 +54,7 @@ The MCP proxy has been removed: there is no longer a listener on port 9999 and Y
 - `Services/HookEventStore.cs` - In-memory store for hook events
 - `Services/McpRequestStore.cs` - In-memory store for MCP requests (max 500)
 - `Services/McpProxyConfig.cs` - Holds the runtime MCP destination URL, signals YARP on change
+- `Services/RequestScrubber.cs` - Strips text from blocks before requests are forwarded
 - `Proxy/CaptureTransformProvider.cs` - YARP ITransformProvider for request/response capture
 - `Proxy/DynamicProxyConfigProvider.cs` - Dynamic YARP config for the Claude (8888) route
 - `Hubs/DashboardHub.cs` - SignalR hub for real-time dashboard updates
