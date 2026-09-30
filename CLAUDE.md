@@ -51,6 +51,7 @@ The MCP proxy has been removed: there is no longer a listener on port 9999 and Y
 - `Program.cs` - App setup: YARP, SignalR, dual-port Kestrel, API endpoints
 - `Models/` - DTOs: ProxiedRequest, ClaudeRequestBody, SseEvent, HookEvent, McpDestinationRequest
 - `Services/RequestStore.cs` - In-memory circular buffer (ConcurrentQueue, evicts oldest past a 100 MB budget)
+- `Services/CompressedBody.cs` - Holds a captured body Brotli-compressed, inflating it on read
 - `Services/HookEventStore.cs` - In-memory store for hook events
 - `Services/McpRequestStore.cs` - In-memory store for MCP requests (max 500)
 - `Services/McpProxyConfig.cs` - Holds the runtime MCP destination URL, signals YARP on change
@@ -81,3 +82,5 @@ The MCP proxy has been removed: there is no longer a listener on port 9999 and Y
 - Kestrel: port 8888 (HTTP proxy), port 5000 (HTTP dashboard); both bind to localhost only
 - API keys are redacted from stored request headers
 - Streaming SSE events are parsed to extract token usage, message ID, stop reason, and time-to-first-token
+- Request and response bodies are stored Brotli-compressed and inflated on read, with nothing lost. The `RequestStore` budget is still measured on uncompressed lengths, so compression lowers memory rather than silently retaining more requests
+- Server GC is disabled in the csproj, since the Web SDK default costs a loopback tool with one dashboard client a lot of footprint for nothing

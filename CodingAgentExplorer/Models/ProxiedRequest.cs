@@ -1,4 +1,7 @@
-﻿namespace CodingAgentExplorer.Models;
+﻿using System.Text.Json.Serialization;
+using CodingAgentExplorer.Services;
+
+namespace CodingAgentExplorer.Models;
 
 public class ProxiedRequest
 {
@@ -9,7 +12,21 @@ public class ProxiedRequest
     public string Method { get; set; } = "";
     public string Path { get; set; } = "";
     public Dictionary<string, string> RequestHeaders { get; set; } = [];
-    public string? RequestBody { get; set; }
+
+    // Bodies are held compressed and inflated on read, so the dashboard payload is byte for
+    // byte what it always was while the store holds a fraction of the memory. Read the
+    // properties sparingly: every get inflates the whole body. For size and emptiness checks
+    // use RequestBodyChars / ResponseBodyChars, which are free.
+    private CompressedBody _requestBody;
+
+    public string? RequestBody
+    {
+        get => _requestBody.Text;
+        set => _requestBody = CompressedBody.From(value);
+    }
+
+    [JsonIgnore]
+    public int RequestBodyChars => _requestBody.Chars;
 
     // Parsed request fields
     public string? Model { get; set; }
@@ -19,7 +36,17 @@ public class ProxiedRequest
     // Response
     public int? StatusCode { get; set; }
     public Dictionary<string, string> ResponseHeaders { get; set; } = [];
-    public string? ResponseBody { get; set; }
+
+    private CompressedBody _responseBody;
+
+    public string? ResponseBody
+    {
+        get => _responseBody.Text;
+        set => _responseBody = CompressedBody.From(value);
+    }
+
+    [JsonIgnore]
+    public int ResponseBodyChars => _responseBody.Chars;
 
     // Parsed response fields
     public string? MessageId { get; set; }

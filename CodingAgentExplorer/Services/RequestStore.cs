@@ -52,9 +52,13 @@ public class RequestStore
 
     // Bodies dominate retained size, so only strings are measured. .NET strings are UTF-16.
     // Sizes are stable by the time a request is stored: SSE streaming completes first.
+    //
+    // Bodies are billed uncompressed even though they are stored compressed, so the budget stays
+    // a statement about how much conversation is kept and compression shows up purely as lower
+    // memory. The *Chars counts weigh a body without inflating it.
     private static long EstimateBytes(ProxiedRequest request)
     {
-        long chars = (request.RequestBody?.Length ?? 0) + (request.ResponseBody?.Length ?? 0);
+        long chars = request.RequestBodyChars + request.ResponseBodyChars;
 
         foreach (var sseEvent in request.SseEvents)
         {

@@ -44,16 +44,18 @@ public class CaptureTransformProvider(ILogger<CaptureTransformProvider> logger) 
         var httpContext = context.HttpContext;
         var request = httpContext.Request;
 
-        // Enable buffering so we can read the body
-        request.EnableBuffering();
-
+        // The body is read here in full and YARP reads it again to forward it, so it has to be
+        // rewindable. EnableBuffering does that, but spills anything past its 30 KB threshold to
+        // a temp file that the swap below then discards, so it costs a disk write per request and
+        // buys nothing. Keep the bytes instead and hand YARP a stream over them.
+        byte[]? raw = null;
         string? body = null;
         if (request.ContentLength > 0 || request.Headers.ContentType.Count > 0)
         {
-            request.Body.Position = 0;
-            using var reader = new StreamReader(request.Body, Encoding.UTF8, leaveOpen: true);
-            body = await reader.ReadToEndAsync();
-            request.Body.Position = 0;
+            raw = await ReadRequestBytesAsync(request, httpContext.RequestAborted);
+
+            // System.Text.Json rejects a leading BOM.
+            body = Encoding.UTF8.GetString(raw).TrimStart('\uFEFF');
         }
 
         // Capture the scrubbed body rather than the client's, so the dashboard shows what the
@@ -61,11 +63,15 @@ public class CaptureTransformProvider(ILogger<CaptureTransformProvider> logger) 
         var scrubbed = string.IsNullOrEmpty(body) ? null : RequestScrubber.Scrub(body);
         if (scrubbed is not null)
         {
-            ForwardScrubbedBody(context, scrubbed);
             logger.LogDebug("Scrubbed request body for {Path}: {Before} -> {After} chars",
                 request.Path, body!.Length, scrubbed.Length);
             body = scrubbed;
         }
+
+        // Forward the client's original bytes when no rule fired: re-encoding the decoded string
+        // would turn any invalid UTF-8 the client sent into U+FFFD.
+        if (raw is not null)
+            ForwardBody(context, scrubbed is null ? raw : Encoding.UTF8.GetBytes(scrubbed));
 
         var proxiedRequest = new ProxiedRequest
         {
@@ -99,12 +105,27 @@ public class CaptureTransformProvider(ILogger<CaptureTransformProvider> logger) 
         httpContext.Items["Stopwatch"] = Stopwatch.StartNew();
     }
 
+    // Content-Length is set on everything the agents send, so the common path allocates exactly
+    // one buffer of the right size. The fallback covers a chunked body.
+    private static async Task<byte[]> ReadRequestBytesAsync(HttpRequest request, CancellationToken ct)
+    {
+        if (request.ContentLength is > 0 and <= int.MaxValue)
+        {
+            var exact = new byte[request.ContentLength.Value];
+            await request.Body.ReadExactlyAsync(exact, ct);
+            return exact;
+        }
+
+        using var buffer = new MemoryStream();
+        await request.Body.CopyToAsync(buffer, ct);
+        return buffer.ToArray();
+    }
+
     // YARP rejects a replacement HttpContent, so the swap goes through the request stream it
     // copies from, and the Content-Length already copied from the client has to be corrected
     // by hand.
-    private static void ForwardScrubbedBody(RequestTransformContext context, string scrubbed)
+    private static void ForwardBody(RequestTransformContext context, byte[] bytes)
     {
-        var bytes = Encoding.UTF8.GetBytes(scrubbed);
         var request = context.HttpContext.Request;
 
         request.Body = new MemoryStream(bytes, writable: false);
@@ -183,7 +204,7 @@ public class CaptureTransformProvider(ILogger<CaptureTransformProvider> logger) 
             // Ignore SSE keep-alive polling: GET / with no body (204 No Content)
             if (proxiedRequest.Method == "GET"
                 && proxiedRequest.Path == "/"
-                && string.IsNullOrEmpty(proxiedRequest.RequestBody))
+                && proxiedRequest.RequestBodyChars == 0)
                 return;
 
             var mcpStore = httpContext.RequestServices.GetRequiredService<McpRequestStore>();

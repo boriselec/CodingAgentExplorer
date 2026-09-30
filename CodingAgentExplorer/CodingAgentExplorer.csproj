@@ -7,6 +7,10 @@
     <InvariantGlobalization>true</InvariantGlobalization>
     <SatelliteResourceLanguages>en-US</SatelliteResourceLanguages>
     <ResourceLanguages>en</ResourceLanguages>
+    <!-- The Web SDK defaults this to true, which costs hundreds of MB of footprint for a
+         loopback tool with a single dashboard client. Background GC stays on: a blocking gen2
+         pause mid-stream would skew the time-to-first-token this proxy exists to measure. -->
+    <ServerGarbageCollection>false</ServerGarbageCollection>
   </PropertyGroup>
 
   <ItemGroup>
