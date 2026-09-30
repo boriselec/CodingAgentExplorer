@@ -32,13 +32,18 @@ public static class RequestScrubber
         ("When you use a pronoun for someone", "including visible thinking.", true),
         ("# userEmail", "unless the user explicitly asks.", true),
         ("# Memory", "verify it still exists before recommending it.", true),
-        ("Available agent types for the Agent tool:", "While bypass permissions mode is active:", false)
+        ("Available agent types for the Agent tool:", "While bypass permissions mode is active:", false),
+        // The context reminder with no context in it, which is what Claude Code sends when
+        // there is no CLAUDE.md. A filled one has entries before "IMPORTANT:" and is kept.
+        ("<system-reminder>\nAs you answer the user's questions, you can use the following context:\n\nIMPORTANT:",
+            "</system-reminder>", true)
     ];
 
     // Every rule needs its start anchor present verbatim in the body, so a body without any of
-    // them cannot change and never has to be parsed.
+    // them cannot change and never has to be parsed. The body is still raw JSON at that point,
+    // so a newline in an anchor is looked for in its escaped form.
     private static readonly string[] Anchors =
-        [.. StrippedTools, .. StrippedMessages, .. StrippedText.Select(rule => rule.Start)];
+        [.. StrippedTools, .. StrippedMessages, .. StrippedText.Select(rule => rule.Start.Replace("\n", "\\n"))];
 
     /// <summary>
     /// Returns the scrubbed JSON, or null when nothing was removed or the body is not JSON,
@@ -189,8 +194,17 @@ public static class RequestScrubber
             case JsonArray array:
             {
                 var changed = false;
-                foreach (var item in array)
-                    changed |= ScrubTextBlocks(item, strip);
+                for (var i = array.Count - 1; i >= 0; i--)
+                {
+                    if (!ScrubTextBlocks(array[i], strip))
+                        continue;
+                    changed = true;
+
+                    // The API rejects a blank text block, so one a rule emptied goes whole, as
+                    // long as it is not the last block left.
+                    if (array.Count > 1 && IsBlankTextBlock(array[i]))
+                        array.RemoveAt(i);
+                }
                 return changed;
             }
 
@@ -198,6 +212,15 @@ public static class RequestScrubber
                 return false;
         }
     }
+
+    private static bool IsBlankTextBlock(JsonNode? node)
+        => node is JsonObject block
+            && block["type"] is JsonValue type
+            && type.TryGetValue<string>(out var typeName)
+            && typeName == "text"
+            && block["text"] is JsonValue value
+            && value.TryGetValue<string>(out var text)
+            && string.IsNullOrWhiteSpace(text);
 
     private static string StripReminders(string text)
     {
