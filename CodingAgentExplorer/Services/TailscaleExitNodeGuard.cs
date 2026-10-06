@@ -12,6 +12,7 @@ namespace CodingAgentExplorer.Services;
 public sealed class TailscaleExitNodeGuard(ILogger<TailscaleExitNodeGuard> logger)
 {
     private static readonly TimeSpan CacheTtl = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan ProbeTimeout = TimeSpan.FromSeconds(3);
 
     private readonly SemaphoreSlim _lock = new(1, 1);
     private DateTimeOffset _cachedAt = DateTimeOffset.MinValue;
@@ -31,7 +32,9 @@ public sealed class TailscaleExitNodeGuard(ILogger<TailscaleExitNodeGuard> logge
             if (DateTimeOffset.UtcNow - _cachedAt < CacheTtl)
                 return _cached;
 
-            var result = await ProbeAsync(ct);
+            // Own fixed timeout: the result is cached and shared across requests,
+            // so it must outlive whichever single request triggered the refresh.
+            var result = await ProbeAsync();
             _cached = result;
             _cachedAt = DateTimeOffset.UtcNow;
             return result;
@@ -42,8 +45,11 @@ public sealed class TailscaleExitNodeGuard(ILogger<TailscaleExitNodeGuard> logge
         }
     }
 
-    private async Task<GuardResult> ProbeAsync(CancellationToken ct)
+    private async Task<GuardResult> ProbeAsync()
     {
+        using var cts = new CancellationTokenSource(ProbeTimeout);
+        var ct = cts.Token;
+
         string json;
         try
         {
@@ -62,15 +68,29 @@ public sealed class TailscaleExitNodeGuard(ILogger<TailscaleExitNodeGuard> logge
             if (proc is null)
                 return new(false, "Failed to start the tailscale process");
 
-            // Read both streams concurrently so a full stderr pipe can't stall the stdout read.
-            var stdoutTask = proc.StandardOutput.ReadToEndAsync(ct);
-            var stderrTask = proc.StandardError.ReadToEndAsync(ct);
-            json = await stdoutTask;
-            var stderr = await stderrTask;
-            await proc.WaitForExitAsync(ct);
+            try
+            {
+                // Read both streams concurrently so a full stderr pipe can't stall the stdout read.
+                var stdoutTask = proc.StandardOutput.ReadToEndAsync(ct);
+                var stderrTask = proc.StandardError.ReadToEndAsync(ct);
+                json = await stdoutTask;
+                var stderr = await stderrTask;
+                await proc.WaitForExitAsync(ct);
 
-            if (proc.ExitCode != 0)
-                return new(false, $"tailscale status exited {proc.ExitCode}: {stderr.Trim()}");
+                if (proc.ExitCode != 0)
+                    return new(false, $"tailscale status exited {proc.ExitCode}: {stderr.Trim()}");
+            }
+            finally
+            {
+                // Disposing the Process doesn't stop it, so kill a CLI that's still running or it outlives the probe.
+                if (!proc.HasExited)
+                    proc.Kill(entireProcessTree: true);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            logger.LogWarning("'tailscale status --json' timed out after {Timeout}s", ProbeTimeout.TotalSeconds);
+            return new(false, $"tailscale status timed out after {ProbeTimeout.TotalSeconds:0}s");
         }
         catch (Exception ex)
         {
